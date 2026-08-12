@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS Asset Extractor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body { background-color: #1a202c; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #2d3748; }
+        ::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 4px; }
+    </style>
+</head>
+<body class="text-gray-200 min-h-screen flex flex-col items-center p-4 md:p-8">
+
+    <div class="w-full max-w-6xl">
+        <h1 class="text-3xl font-bold text-indigo-400 mb-2 text-center">TTS Asset Extractor</h1>
+        <p class="text-gray-400 text-center mb-8">Upload your Tabletop Simulator JSON save to extract and categorize assets.</p>
+
+        <!-- Upload Area -->
+        <div id="drop-zone" class="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center cursor-pointer hover:border-indigo-500 transition-colors mb-6">
+            <input type="file" id="file-input" accept=".json" class="hidden">
+            <svg class="w-12 h-12 mx-auto text-gray-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+            <p class="text-lg text-gray-300">Drop JSON here or click to browse</p>
+            <p class="text-sm text-gray-500 mt-1" id="file-name">No file selected</p>
+        </div>
+
+        <!-- Settings -->
+        <div class="flex flex-wrap gap-4 justify-center mb-6">
+            <label class="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-lg cursor-pointer">
+                <input type="checkbox" id="use-steam-mirror" checked class="accent-indigo-500">
+                Use Akamai Mirror (Steam)
+            </label>
+            <label class="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-lg cursor-pointer">
+                <input type="checkbox" id="use-imgur-mirror" checked class="accent-indigo-500">
+                Use kageurufu Mirror (Imgur)
+            </label>
+            <button id="process-btn" disabled class="bg-indigo-600 hover:bg-indigo-700 px-6 py-2 rounded-lg font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                Extract URLs
+            </button>
+        </div>
+
+        <!-- Results Area -->
+        <div id="results" class="hidden w-full">
+            <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+                <div class="text-lg">
+                    Found <span id="url-count" class="font-bold text-indigo-400">0</span> unique URLs
+                </div>
+                <div class="flex gap-2">
+                    <button id="download-zip" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors">
+                        Download as ZIP
+                    </button>
+                    <button id="download-txt" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors">
+                        Export URLs.txt
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Progress Bar -->
+            <div id="progress-container" class="hidden mb-4">
+                <div class="bg-gray-800 rounded-full h-4 overflow-hidden">
+                    <div id="progress-bar" class="bg-indigo-600 h-full transition-all duration-200" style="width: 0%"></div>
+                </div>
+                <p id="progress-text" class="text-center text-sm text-gray-400 mt-1">0 / 0</p>
+            </div>
+
+            <div id="table-container" class="bg-gray-800 rounded-lg p-4 max-h-[60vh] overflow-y-auto">
+                <table class="w-full text-left text-sm">
+                    <thead class="text-xs text-gray-400 uppercase border-b border-gray-700 sticky top-0 bg-gray-800">
+                        <tr>
+                            <th class="p-2 w-1/6">Folder</th>
+                            <th class="p-2 w-1/3">Filename (TTS Cache Name)</th>
+                            <th class="p-2 w-1/3">URL</th>
+                            <th class="p-2 w-1/6 text-center">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="url-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const URL_KEYS_MAP = {
+            "AssetbundleURL": "Assetbundles", "AssetbundleSecondaryURL": "Assetbundles",
+            "CurrentAudioURL": "Audio", "Item1": "Audio",
+            "ImageURL": "Images", "ImageSecondaryURL": "Images",
+            "FaceURL": "Images", "BackURL": "Images",
+            "DiffuseURL": "Images", "NormalURL": "Images",
+            "PDFUrl": "PDF", "PDFURL": "PDF",
+            "MeshURL": "Models", "ColliderURL": "Models",
+            "LuaScript": "Text", "LuaScriptState": "Text"
+        };
+
+        const EXTENSION_MAP = [
+            [".unity3d", "Assetbundles"], [".mp3", "Audio"],
+            [".jpg", "Images"], [".jpeg", "Images"], [".png", "Images"],
+            [".rawt", "Images Raw"], [".obj", "Models"], [".rawm", "Models Raw"],
+            [".pdf", "PDF"], [".txt", "Text"], [".lua", "Text"]
+        ];
+
+        function sanitizeFilename(name) { return name.replace(/[^A-Za-z0-9]/g, ''); }
+        function cleanUrl(u) { return u.replace(/["'\\\),;\]]+$/g, ''); }
+
+        function rewriteImgur(url, enabled) {
+            if (!enabled) return url;
+            try {
+                const parsed = new URL(url);
+                if (parsed.hostname.includes('imgur.com')) {
+                    const parts = parsed.pathname.split('/').filter(Boolean);
+                    if (parts.length > 0) return `https://imgur.kageurufu.net/${parts[parts.length - 1]}`;
+                }
+            } catch (e) {}
+            return url;
+        }
+
+        function rewriteSteamCdn(url, enabled) {
+            if (!enabled) return url;
+            try {
+                const parsed = new URL(url);
+                if (parsed.hostname.includes('steamusercontent.com') && !parsed.hostname.includes('akamaihd')) {
+                    parsed.hostname = 'steamusercontent-a.akamaihd.net';
+                    parsed.protocol = 'https:';
+                    return parsed.toString();
+                }
+            } catch (e) {}
+            return url;
+        }
+
+        function getFolderAndExt(url, hint) {
+            try {
+                const path = new URL(url).pathname.toLowerCase();
+                for (const [ext, folder] of EXTENSION_MAP) {
+                    if (path.endsWith(ext)) return { folder, ext };
+                }
+            } catch (e) {}
+            if (hint) {
+                const defaults = { "Assetbundles": ".unity3d", "Models": ".obj", "Images": ".png", "Audio": ".mp3", "PDF": ".pdf", "Text": ".txt" };
+                return { folder: hint, ext: defaults[hint] || ".bin" };
+            }
+            return { folder: "Unknown", ext: ".bin" };
+        }
+
+        function extractUrls(obj, found, useSteam, useImgur) {
+            if (Array.isArray(obj)) {
+                obj.forEach(item => extractUrls(item, found, useSteam, useImgur));
+            } else if (typeof obj === 'object' && obj !== null) {
+                for (const [k, v] of Object.entries(obj)) {
+                    if (typeof v === 'string') {
+                        const low = k.toLowerCase();
+                        let hint = null;
+                        for (const [key, h] of Object.entries(URL_KEYS_MAP)) {
+                            if (k === key || low.endsWith(key.toLowerCase())) { hint = h; break; }
+                        }
+                        
+                        if (v.startsWith('http')) {
+                            let clean = rewriteSteamCdn(rewriteImgur(cleanUrl(v), useImgur), useSteam);
+                            if (!found[clean] || (found[clean].hint === null && hint !== null)) {
+                                found[clean] = { url: clean, hint: hint };
+                            }
+                        } else if ((k === "LuaScriptState" || k === "LuaScript") && v.trim().startsWith("{")) {
+                            try { extractUrls(JSON.parse(v), found, useSteam, useImgur); } catch (e) {
+                                const matches = v.match(/https?:\/\/[^\s"'\\]+/gi);
+                                if (matches) matches.forEach(m => {
+                                    let clean = rewriteSteamCdn(rewriteImgur(cleanUrl(m), useImgur), useSteam);
+                                    if (!found[clean]) found[clean] = { url: clean, hint: null };
+                                });
+                            }
+                        } else if (v.includes('http')) {
+                            const matches = v.match(/https?:\/\/[^\s"'\\]+/gi);
+                            if (matches) matches.forEach(m => {
+                                let clean = rewriteSteamCdn(rewriteImgur(cleanUrl(m), useImgur), useSteam);
+                                if (!found[clean]) found[clean] = { url: clean, hint: null };
+                            });
+                        }
+                    } else {
+                        extractUrls(v, found, useSteam, useImgur);
+                    }
+                }
+            } else if (typeof obj === 'string' && obj.trim().startsWith('{')) {
+                try { extractUrls(JSON.parse(obj), found, useSteam, useImgur); } catch (e) {}
+            }
+        }
+
+        // UI Elements
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileName = document.getElementById('file-name');
+        const processBtn = document.getElementById('process-btn');
+        const resultsDiv = document.getElementById('results');
+        const urlCount = document.getElementById('url-count');
+        const tableBody = document.getElementById('url-table-body');
+        const downloadTxtBtn = document.getElementById('download-txt');
+        const downloadZipBtn = document.getElementById('download-zip');
+        const useSteamChk = document.getElementById('use-steam-mirror');
+        const useImgurChk = document.getElementById('use-imgur-mirror');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
+
+        let jsonData = null;
+        let extractedAssets = [];
+
+        ['dragover', 'click'].forEach(evt => dropZone.addEventListener(evt, (e) => {
+            if (evt === 'dragover') e.preventDefault();
+            fileInput.click();
+        }));
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleFile(e.target.files[0]);
+        });
+
+        function handleFile(file) {
+            if (!file.name.endsWith('.json')) {
+                alert('Please upload a JSON file.');
+                return;
+            }
+            fileName.textContent = file.name;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    jsonData = JSON.parse(e.target.result);
+                    processBtn.disabled = false;
+                } catch (err) {
+                    alert('Invalid JSON file.');
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        processBtn.addEventListener('click', () => {
+            if (!jsonData) return;
+            const found = {};
+            extractUrls(jsonData, found, useSteamChk.checked, useImgurChk.checked);
+            
+            extractedAssets = Object.values(found).map(item => {
+                const { folder, ext } = getFolderAndExt(item.url, item.hint);
+                return {
+                    url: item.url,
+                    folder: folder,
+                    filename: sanitizeFilename(item.url) + ext
+                };
+            });
+
+            extractedAssets.sort((a, b) => a.folder.localeCompare(b.folder));
+
+            urlCount.textContent = extractedAssets.length;
+            resultsDiv.classList.remove('hidden');
+            renderTable();
+        });
+
+        function renderTable() {
+            tableBody.innerHTML = '';
+            extractedAssets.forEach(asset => {
+                const row = document.createElement('tr');
+                row.className = 'border-b border-gray-700 hover:bg-gray-700';
+                row.innerHTML = `
+                    <td class="p-2 text-indigo-400 font-medium">${asset.folder}</td>
+                    <td class="p-2 text-gray-300 break-all">${asset.filename}</td>
+                    <td class="p-2 text-gray-500 break-all text-xs"><a href="${asset.url}" target="_blank" class="hover:text-indigo-400">${asset.url}</a></td>
+                    <td class="p-2 text-center text-gray-500 text-xs" id="status-${asset.filename}">Pending</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        downloadTxtBtn.addEventListener('click', () => {
+            let txt = extractedAssets.map(a => a.url).join('\n');
+            const blob = new Blob([txt], { type: 'text/plain' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'urls.txt';
+            link.click();
+        });
+
+        downloadZipBtn.addEventListener('click', async () => {
+            if (extractedAssets.length === 0) return;
+            
+            downloadZipBtn.disabled = true;
+            downloadZipBtn.innerText = "Processing...";
+            progressContainer.classList.remove('hidden');
+            
+            const zip = new JSZip();
+            let completed = 0;
+
+            // Limit concurrency to avoid browser timeouts
+            const concurrencyLimit = 5;
+            let index = 0;
+
+            async function fetchNext() {
+                while (index < extractedAssets.length) {
+                    const i = index++;
+                    const asset = extractedAssets[i];
+                    const statusEl = document.getElementById(`status-${asset.filename}`);
+                    
+                    try {
+                        const response = await fetch(asset.url);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        const blob = await response.blob();
+                        
+                        const folder = zip.folder(asset.folder);
+                        folder.file(asset.filename, blob);
+                        
+                        statusEl.textContent = 'OK';
+                        statusEl.classList.add('text-green-400');
+                    } catch (e) {
+                        statusEl.textContent = 'Failed';
+                        statusEl.classList.add('text-red-400');
+                        console.error(`Failed ${asset.url}: ${e.message}`);
+                    } finally {
+                        completed++;
+                        const pct = (completed / extractedAssets.length) * 100;
+                        progressBar.style.width = `${pct}%`;
+                        progressText.textContent = `${completed} / ${extractedAssets.length}`;
+                    }
+                }
+            }
+
+            // Start workers
+            await Promise.all(Array(concurrencyLimit).fill(0).map(fetchNext));
+
+            progressText.textContent = "Zipping files...";
+            const content = await zip.generateAsync({ type: "blob" });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(content);
+            link.download = 'tts_assets.zip';
+            link.click();
+            
+            downloadZipBtn.disabled = false;
+            downloadZipBtn.innerText = "Download as ZIP";
+        });
+    </script>
+</body>
+</html>
