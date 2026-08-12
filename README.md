@@ -1,5 +1,5 @@
 
-# TTS Asset Extractor & Downloader
+# Tabletop Simulator Asset Extractor & Downloader
 
 A Python script to extract asset URLs (images, models, audio, PDFs, assetbundles) from Tabletop Simulator save files (.json) and download them locally.
 
