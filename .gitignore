@@ -1,0 +1,22 @@
+# Assets downloaded by the script
+assets/
+*.part
+_failed.txt
+
+# Python environment & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
