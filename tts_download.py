@@ -2,8 +2,8 @@
 """
 Extract asset URLs from a Tabletop Simulator JSON save and download them 
 into categorized folders based on asset type.
-Names files using the sanitized full URL + extension.
-Optionally rewrite Imgur and Steam CDN links to mirrors.
+Names files using the ORIGINAL sanitized URL + extension.
+Optionally downloads from Imgur and Steam CDN mirrors.
 
 Usage:
     python tts_download.py <path-to-json> [--proxy http://host:port]
@@ -115,7 +115,7 @@ def rewrite_steam_cdn(url: str, enabled: bool = True) -> str:
 
 
 def extract_urls(obj, found: dict, use_steam_mirror: bool, use_imgur_mirror: bool):
-    """Recursively walk JSON, collecting URLs into a dict {url: type_hint}."""
+    """Recursively walk JSON, collecting URLs into a dict {rewritten_url: (original_url, type_hint)}."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             if isinstance(v, str):
@@ -129,10 +129,11 @@ def extract_urls(obj, found: dict, use_steam_mirror: bool, use_imgur_mirror: boo
                         break
                 
                 if v.startswith("http"):
-                    # Clean and apply Imgur + Steam CDN rewrites
-                    clean = rewrite_steam_cdn(rewrite_imgur(clean_url(v), use_imgur_mirror), use_steam_mirror)
-                    if clean not in found or (found[clean] is None and hint is not None):
-                        found[clean] = hint
+                    orig = clean_url(v)
+                    # Rewrite only for the download request, but keep original for the filename
+                    clean = rewrite_steam_cdn(rewrite_imgur(orig, use_imgur_mirror), use_steam_mirror)
+                    if clean not in found or (found[clean][1] is None and hint is not None):
+                        found[clean] = (orig, hint)
                 
                 # 2. Embedded JSON strings (e.g., LuaScriptState with Imgur links)
                 elif k in ("LuaScriptState", "LuaScript") and v.strip().startswith("{"):
@@ -140,14 +141,16 @@ def extract_urls(obj, found: dict, use_steam_mirror: bool, use_imgur_mirror: boo
                         extract_urls(json.loads(v), found, use_steam_mirror, use_imgur_mirror)
                     except Exception:
                         for m in URL_REGEX.findall(v):
-                            clean = rewrite_steam_cdn(rewrite_imgur(clean_url(m), use_imgur_mirror), use_steam_mirror)
-                            found.setdefault(clean, None)
+                            orig = clean_url(m)
+                            clean = rewrite_steam_cdn(rewrite_imgur(orig, use_imgur_mirror), use_steam_mirror)
+                            found.setdefault(clean, (orig, None))
                             
                 # 3. Fallback for any text containing http
                 elif "http" in v:
                     for m in URL_REGEX.findall(v):
-                        clean = rewrite_steam_cdn(rewrite_imgur(clean_url(m), use_imgur_mirror), use_steam_mirror)
-                        found.setdefault(clean, None)
+                        orig = clean_url(m)
+                        clean = rewrite_steam_cdn(rewrite_imgur(orig, use_imgur_mirror), use_steam_mirror)
+                        found.setdefault(clean, (orig, None))
             else:
                 extract_urls(v, found, use_steam_mirror, use_imgur_mirror)
                 
@@ -199,11 +202,11 @@ def get_folder_and_ext(url: str, hint: str | None, content_type: str | None) -> 
 
 
 def filename_for(url: str, ext: str) -> str:
-    """Build filename: sanitized URL + extension."""
+    """Build filename: sanitized ORIGINAL URL + extension."""
     return sanitize_filename(url) + ext
 
 
-def download_one(url: str, hint: str | None, base_dir: str, proxy: str | None, retries: int = 3):
+def download_one(rewritten_url: str, original_url: str, hint: str | None, base_dir: str, proxy: str | None, retries: int = 3):
     proxies = {"http": proxy, "https": proxy} if proxy else None
     last_err = None
     
@@ -216,18 +219,20 @@ def download_one(url: str, hint: str | None, base_dir: str, proxy: str | None, r
     
     for attempt in range(1, retries + 1):
         try:
-            # Use a streaming GET request directly. 
-            # This avoids 400 Bad Request errors from servers that reject HEAD requests.
-            with requests.get(url, proxies=proxies, stream=True, timeout=60, headers=headers) as r:
+            # Use a streaming GET request directly on the REWRITTEN URL. 
+            with requests.get(rewritten_url, proxies=proxies, stream=True, timeout=60, headers=headers) as r:
                 r.raise_for_status()
                 
                 # We have the headers, but haven't downloaded the body yet
                 content_type = r.headers.get("Content-Type", "")
-                folder, ext = get_folder_and_ext(url, hint, content_type)
+                
+                # Determine folder and ext using the ORIGINAL URL
+                folder, ext = get_folder_and_ext(original_url, hint, content_type)
                 target_dir = os.path.join(base_dir, folder)
                 os.makedirs(target_dir, exist_ok=True)
                 
-                fname = filename_for(url, ext)
+                # Name the file using the ORIGINAL URL
+                fname = filename_for(original_url, ext)
                 path = os.path.join(target_dir, fname)
                 
                 # Skip if already downloaded
@@ -281,9 +286,9 @@ def main():
 
     if args.list_only:
         for u in urls:
-            hint = urls_dict.get(u)
-            folder, ext = get_folder_and_ext(u, hint, None)
-            print(f"[{folder: <12}] {u}")
+            orig, hint = urls_dict[u]
+            folder, ext = get_folder_and_ext(orig, hint, None)
+            print(f"[{folder: <12}] {orig}")
         return
 
     os.makedirs(args.out, exist_ok=True)
@@ -294,7 +299,8 @@ def main():
     failed = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(download_one, u, urls_dict.get(u), args.out, args.proxy): u 
+            # Pass rewritten_url (u), original_url (urls_dict[u][0]), and hint (urls_dict[u][1])
+            ex.submit(download_one, u, urls_dict[u][0], urls_dict[u][1], args.out, args.proxy): u 
             for u in urls
         }
         
